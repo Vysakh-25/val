@@ -12,99 +12,117 @@ BASE_DIR = os.path.dirname(__file__)
 IMG_DIR = os.path.join(BASE_DIR, "digits")
 os.makedirs(IMG_DIR, exist_ok=True)
 
-# ---------------- TKINTER WINDOW ----------------
-WIDTH = 280
-HEIGHT = 280
-BG_COLOR = "black"
-DRAW_COLOR = "white"
+# ---------------- WINDOW ----------------
+WIDTH = 500
+HEIGHT = 220
 
 root = tk.Tk()
-root.title("Draw Digit")
+root.title("Whole Number Recognizer")
 
-canvas = tk.Canvas(root, width=WIDTH, height=HEIGHT, bg=BG_COLOR)
+canvas = tk.Canvas(root, width=WIDTH, height=HEIGHT, bg="black")
 canvas.pack()
 
-# image used for saving
-image = Image.new("L", (WIDTH, HEIGHT), color=0)
+image = Image.new("L", (WIDTH, HEIGHT), 0)
 draw = ImageDraw.Draw(image)
 
 last_x, last_y = None, None
 
-
-# ---------------- DRAW FUNCTIONS ----------------
+# ---------------- DRAW ----------------
 def start_draw(event):
     global last_x, last_y
     last_x, last_y = event.x, event.y
 
-
-def draw_digit(event):
+def draw_line(event):
     global last_x, last_y
-
     x, y = event.x, event.y
 
     canvas.create_line(last_x, last_y, x, y,
-                       fill=DRAW_COLOR, width=18,
+                       fill="white", width=18,
                        capstyle=tk.ROUND, smooth=True)
 
-    draw.line([last_x, last_y, x, y], fill=255, width=18)
-
+    draw.line((last_x, last_y, x, y), fill=255, width=18)
     last_x, last_y = x, y
-
 
 def clear_canvas():
     global image, draw
     canvas.delete("all")
-    image = Image.new("L", (WIDTH, HEIGHT), color=0)
+    image = Image.new("L", (WIDTH, HEIGHT), 0)
     draw = ImageDraw.Draw(image)
 
+# ---------------- PROCESS SINGLE DIGIT ----------------
+def prepare_digit(digit_img):
+    h, w = digit_img.shape
 
-# ---------------- MAIN LOGIC ----------------
-def predict_digit():
+    size = max(h, w) + 20
+    square = np.zeros((size, size), dtype=np.uint8)
+
+    y_off = (size - h) // 2
+    x_off = (size - w) // 2
+    square[y_off:y_off+h, x_off:x_off+w] = digit_img
+
+    square = cv2.resize(square, (28, 28))
+    square = square / 255.0
+    square = square.reshape(1, 28, 28)
+    return square
+
+# ---------------- PREDICT WHOLE NUMBER ----------------
+def predict_number():
     global image
 
-    # preprocess
-    img = image.resize((28, 28))
-    img_array = np.array(img) / 255.0
-    img_array = img_array.reshape(1, 28, 28)
+    img = np.array(image)
 
-    prediction = model.predict(img_array, verbose=0)
-    predicted_digit = int(np.argmax(prediction))
+    _, thresh = cv2.threshold(img, 20, 255, cv2.THRESH_BINARY)
 
-    print(f"\nPredicted digit: {predicted_digit}")
+    contours, _ = cv2.findContours(
+        thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    if not contours:
+        print("Nothing drawn.")
+        return
+
+    boxes = [cv2.boundingRect(c) for c in contours]
+    boxes = sorted(boxes, key=lambda b: b[0])  # left to right
+
+    digits = []
+
+    for (x, y, w, h) in boxes:
+        roi = thresh[y:y+h, x:x+w]
+        processed = prepare_digit(roi)
+
+        pred = model.predict(processed, verbose=0)
+        digit = str(np.argmax(pred))
+        digits.append(digit)
+
+    number = "".join(digits)
+
+    print(f"\nPredicted number: {number}")
     correct = input("Is this correct? (y/n): ").strip().lower()
 
     if correct == "y":
-        print("Good.")
+        print("Nice.")
 
     elif correct == "n":
-        true_label = int(input("Enter correct digit (0-9): "))
+        true_value = input("Enter correct whole number: ").strip()
 
         # save image
         count = len([f for f in os.listdir(IMG_DIR) if f.endswith(".png")]) + 1
-        save_path = os.path.join(IMG_DIR, f"digit{count}.png")
+        save_path = os.path.join(IMG_DIR, f"{true_value}_{count}.png")
         image.save(save_path)
         print("Saved:", save_path)
 
-        # train model
-        model.fit(img_array, np.array([true_label]), epochs=1, verbose=0)
-        model.save("handwritten.keras")
-        print("Model updated and saved.")
+        print("Stored for future dataset building.")
 
     else:
         print("Invalid input.")
 
     clear_canvas()
 
-
 # ---------------- BUTTONS ----------------
-btn_predict = tk.Button(root, text="Predict", command=predict_digit)
-btn_predict.pack(fill="x")
+tk.Button(root, text="Predict", command=predict_number).pack(fill="x")
+tk.Button(root, text="Clear", command=clear_canvas).pack(fill="x")
 
-btn_clear = tk.Button(root, text="Clear", command=clear_canvas)
-btn_clear.pack(fill="x")
-
-# mouse binding
 canvas.bind("<Button-1>", start_draw)
-canvas.bind("<B1-Motion>", draw_digit)
+canvas.bind("<B1-Motion>", draw_line)
 
 root.mainloop()
