@@ -1,0 +1,18 @@
+html,body { height:100%; margin:0; display:flex; align-items:center; justify-content:center; background:#f7f3ea; }
+canvas { background: linear-gradient(#f7f3ea,#f1eddc); border:3px solid #ddd; box-shadow:0 8px 30px rgba(0,0,0,0.08); }
+.ui { position: absolute; top:18px; left:18px; font-family: Inter, system-ui, sans-serif; color:#222; }
+
+/* moved hint to top center so it never overlaps the player/ball */
+.hint {
+  position:absolute;
+  top:18px;
+  left:50%;
+  transform:translateX(-50%);
+  font-family: Inter, system-ui, sans-serif;
+  color:#444;
+  pointer-events:none;
+  background:rgba(255,255,255,0.0);
+}
+
+/* helper hidden class used when game starts */
+.hint.hidden { display:none; }
