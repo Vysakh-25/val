@@ -1,0 +1,660 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Tactical Web FPS - Round & Ability ECS</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #87CEEB; font-family: 'Courier New', Courier, monospace; }
+        canvas { display: block; }
+        #crosshair {
+            position: absolute; top: 50%; left: 50%;
+            width: 4px; height: 4px; background: cyan;
+            transform: translate(-50%, -50%); border-radius: 50%;
+            box-shadow: 0 0 2px black; pointer-events: none;
+        }
+        #ui { position: absolute; bottom: 20px; right: 20px; color: white; font-size: 24px; font-weight: bold; text-shadow: 2px 2px 0 #000; text-align: right;}
+        #roundUi { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); color: white; font-size: 32px; font-weight: bold; text-shadow: 2px 2px 0 #000; text-align: center; }
+        #abilityUi { font-size: 16px; margin-top: 5px; color: #aaa; }
+        #menu {
+            position: absolute; top: 0; left: 0; width: 100vw; height: 100vh;
+            background: rgba(0, 0, 0, 0.7); color: white;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+        }
+        .bind-row { display: flex; justify-content: space-between; width: 350px; margin: 10px 0; font-size: 18px; }
+        .bind-btn { padding: 5px 15px; font-size: 16px; cursor: pointer; background: #333; color: white; border: 1px solid #555; }
+        #resumeBtn { margin-top: 30px; padding: 10px 20px; font-size: 20px; cursor: pointer; background: #00aa00; border: none; color: white; }
+    </style>
+</head>
+<body>
+    <div id="crosshair"></div>
+    <div id="roundUi">
+        <div id="phaseDisplay">BUY PHASE</div>
+        <div id="timeDisplay">0:00</div>
+    </div>
+    <div id="ui">
+        Ammo: <span id="ammoDisplay">25/25</span>
+        <div id="abilityUi">Q: Dash (Ready) | E: Smoke (Ready)</div>
+    </div>
+
+    <div id="menu">
+        <h1>Game Paused</h1>
+        <div id="bindsContainer"></div>
+        <button id="resumeBtn">Resume</button>
+    </div>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    
+    <script>
+        // ==========================================
+        // 1. DATA, CONFIGS & GAME STATE
+        // ==========================================
+        const WEAPON_CONFIGS = {
+            VANDAL: {
+                fireRate: 0.1, ammo: 25, baseSpread: 0.005,
+                spreadModifiers: { idle: 0, walking: 0.02, running: 0.06, airborne: 0.15 },
+                adsSpreadMultiplier: 0.5,
+                recoilPattern: [{p: 0.01, y: 0}, {p: 0.02, y: 0.002}, {p: 0.025, y: -0.005}, {p: 0.03, y: 0.01}],
+                recoilResetTime: 0.25, recoilRecoveryRate: 6.0, damage: 35
+            }
+        };
+
+        const ABILITY_CONFIGS = {
+            DASH: { type: 'IMPULSE', force: 40, cooldown: 4 },
+            SMOKE: { type: 'SPAWN_SMOKE', duration: 8, cooldown: 12 }
+        };
+
+        // Global State Machine
+        const GAME_STATE = {
+            phase: 'BUY_PHASE', // BUY_PHASE, ACTIVE, END
+            timer: 5.0,
+            roundNum: 1
+        };
+
+        // ==========================================
+        // 2. COMPONENTS (Pure Data)
+        // ==========================================
+        class InputIntent {
+            constructor() {
+                this.moveDir = new THREE.Vector3();
+                this.jump = false; this.shoot = false; this.ads = false;
+                this.ability1 = false; this.ability2 = false;
+                this.mouseDelta = { x: 0, y: 0 };
+            }
+        }
+
+        class PlayerState { constructor() { this.isGrounded = false; this.movementState = 'idle'; } }
+        class WeaponState { 
+            constructor(configName) {
+                this.config = WEAPON_CONFIGS[configName];
+                this.ammo = this.config.ammo;
+                this.timeSinceLastShot = 0; this.shotsFired = 0; this.currentRecoilPitch = 0;
+            }
+        }
+        
+        class AbilityState {
+            constructor() {
+                // Map inputs to configs and track cooldowns
+                this.q = { id: 'DASH', cdLeft: 0 };
+                this.e = { id: 'SMOKE', cdLeft: 0 };
+            }
+        }
+
+        class Tags { constructor(initialTags = []) { this.list = new Set(initialTags); } has(tag) { return this.list.has(tag); } }
+        class HealthState { constructor(max = 100) { this.max = max; this.current = max; this.isAlive = true; } }
+        class SpawnPoint { constructor(x, y, z) { this.position = new THREE.Vector3(x, y, z); } }
+        class Lifetime { constructor(seconds) { this.timeLeft = seconds; } }
+        class StatusEffects { constructor() { this.slowed = 0; this.blinded = 0; } }
+
+        // ==========================================
+        // 3. ENTITY MANAGER
+        // ==========================================
+        class EntityManager {
+            constructor() { this.entities = new Map(); this.nextId = 1; this.toDestroy = []; }
+            createEntity() {
+                const id = this.nextId++;
+                const entity = { id, position: new THREE.Vector3(), velocity: new THREE.Vector3(), rotation: { pitch: 0, yaw: 0 }, components: {} };
+                this.entities.set(id, entity); return entity;
+            }
+            addComponent(entityId, compName, data) { const e = this.entities.get(entityId); if (e) e.components[compName] = data; }
+            queueDestroy(id) { this.toDestroy.push(id); }
+            cleanup() {
+                this.toDestroy.forEach(id => this.entities.delete(id));
+                this.toDestroy = [];
+            }
+        }
+
+        // ==========================================
+        // 4. SYSTEMS
+        // ==========================================
+        class RoundSystem {
+            update(dt, entities, state) {
+                state.timer -= dt;
+                
+                // Update UI
+                document.getElementById('phaseDisplay').innerText = state.phase.replace('_', ' ');
+                document.getElementById('timeDisplay').innerText = Math.max(0, Math.ceil(state.timer));
+
+                if (state.timer <= 0) {
+                    if (state.phase === 'BUY_PHASE') {
+                        state.phase = 'ACTIVE'; state.timer = 30; // 30s active round for testing
+                    } else if (state.phase === 'ACTIVE') {
+                        state.phase = 'END'; state.timer = 3;
+                    } else if (state.phase === 'END') {
+                        state.phase = 'BUY_PHASE'; state.timer = 5; state.roundNum++;
+                        this.resetRound(entities);
+                    }
+                }
+            }
+
+            resetRound(entities) {
+                // 1. Reset Players and AI
+                for (const [id, entity] of entities) {
+                    if (entity.components.Tags?.has('Player') || entity.components.Tags?.has('Enemy')) {
+                        // Reset Health
+                        if (entity.components.HealthState) {
+                            entity.components.HealthState.current = entity.components.HealthState.max;
+                            entity.components.HealthState.isAlive = true;
+                        }
+                        if (entity.components.Tags.has('Dead')) entity.components.Tags.list.delete('Dead');
+                        
+                        // Reset Ammo & Cooldowns
+                        if (entity.components.WeaponState) entity.components.WeaponState.ammo = entity.components.WeaponState.config.ammo;
+                        if (entity.components.AbilityState) {
+                            entity.components.AbilityState.q.cdLeft = 0;
+                            entity.components.AbilityState.e.cdLeft = 0;
+                        }
+                        
+                        // Teleport to Spawn
+                        if (entity.components.SpawnPoint) {
+                            entity.position.copy(entity.components.SpawnPoint.position);
+                            entity.velocity.set(0,0,0);
+                        }
+                    }
+                }
+            }
+        }
+
+        class AbilitySystem {
+            constructor(abilityEventQueue) { this.events = abilityEventQueue; }
+            update(dt, entities) {
+                for (const [id, entity] of entities) {
+                    const abilities = entity.components.AbilityState;
+                    const intent = entity.components.InputIntent;
+                    if (!abilities || !intent || GAME_STATE.phase !== 'ACTIVE') continue;
+
+                    // Tick cooldowns
+                    if (abilities.q.cdLeft > 0) abilities.q.cdLeft -= dt;
+                    if (abilities.e.cdLeft > 0) abilities.e.cdLeft -= dt;
+
+                    // Update UI for Local Player
+                    if (entity.components.Tags?.has('LocalPlayer')) {
+                        const qStatus = abilities.q.cdLeft > 0 ? Math.ceil(abilities.q.cdLeft) + 's' : 'Ready';
+                        const eStatus = abilities.e.cdLeft > 0 ? Math.ceil(abilities.e.cdLeft) + 's' : 'Ready';
+                        document.getElementById('abilityUi').innerText = `Q: Dash (${qStatus}) | E: Smoke (${eStatus})`;
+                    }
+
+                    // Trigger Abilities
+                    if (intent.ability1 && abilities.q.cdLeft <= 0) {
+                        this.events.push({ casterId: id, configId: abilities.q.id });
+                        abilities.q.cdLeft = ABILITY_CONFIGS[abilities.q.id].cooldown;
+                    }
+                    if (intent.ability2 && abilities.e.cdLeft <= 0) {
+                        this.events.push({ casterId: id, configId: abilities.e.id });
+                        abilities.e.cdLeft = ABILITY_CONFIGS[abilities.e.id].cooldown;
+                    }
+                }
+            }
+        }
+
+        class AbilityActionSystem {
+            constructor(entityManager) { this.em = entityManager; }
+            update(abilityEvents, entities) {
+                while (abilityEvents.length > 0) {
+                    const event = abilityEvents.pop();
+                    const caster = entities.get(event.casterId);
+                    const cfg = ABILITY_CONFIGS[event.configId];
+                    if (!caster || !cfg) continue;
+
+                    if (cfg.type === 'IMPULSE') {
+                        // Dash forward in the direction the entity is looking
+                        const euler = new THREE.Euler(0, caster.rotation.yaw, 0, 'YXZ');
+                        const forward = new THREE.Vector3(0, 0, -1).applyEuler(euler).normalize();
+                        caster.velocity.addScaledVector(forward, cfg.force);
+                    } 
+                    else if (cfg.type === 'SPAWN_SMOKE') {
+                        // Spawn a smoke entity slightly in front of the player
+                        const euler = new THREE.Euler(caster.rotation.pitch, caster.rotation.yaw, 0, 'YXZ');
+                        const forward = new THREE.Vector3(0, 0, -1).applyEuler(euler).normalize();
+                        const spawnPos = caster.position.clone().addScaledVector(forward, 15);
+                        spawnPos.y = 2; // Keep it near the floor
+
+                        const smoke = this.em.createEntity();
+                        smoke.position.copy(spawnPos);
+                        this.em.addComponent(smoke.id, 'Tags', new Tags(['Smoke']));
+                        this.em.addComponent(smoke.id, 'Lifetime', new Lifetime(cfg.duration));
+                    }
+                }
+            }
+        }
+
+        class LifetimeSystem {
+            constructor(entityManager) { this.em = entityManager; }
+            update(dt, entities) {
+                for (const [id, entity] of entities) {
+                    if (entity.components.Lifetime) {
+                        entity.components.Lifetime.timeLeft -= dt;
+                        if (entity.components.Lifetime.timeLeft <= 0) this.em.queueDestroy(id);
+                    }
+                }
+            }
+        }
+
+        class MovementSystem {
+            constructor() { this.speed = 40.0; this.friction = 10.0; this.jumpForce = 12.0; }
+            update(dt, entities) {
+                for (const [id, entity] of entities) {
+                    const intent = entity.components.InputIntent;
+                    const state = entity.components.PlayerState;
+                    const health = entity.components.HealthState;
+                    if (!intent || !state || (health && !health.isAlive)) continue;
+
+                    // Mouse Look
+                    const sensitivity = intent.ads ? 0.001 : 0.002;
+                    entity.rotation.yaw -= intent.mouseDelta.x * sensitivity;
+                    entity.rotation.pitch -= intent.mouseDelta.y * sensitivity;
+                    entity.rotation.pitch = Math.max(-Math.PI/2, Math.min(Math.PI/2, entity.rotation.pitch));
+
+                    // Block movement during BUY PHASE or END
+                    if (GAME_STATE.phase !== 'ACTIVE') continue;
+
+                    if (state.isGrounded) {
+                        const direction = intent.moveDir.clone().normalize();
+                        direction.applyEuler(new THREE.Euler(0, entity.rotation.yaw, 0));
+
+                        entity.velocity.x += direction.x * this.speed * dt;
+                        entity.velocity.z += direction.z * this.speed * dt;
+                        
+                        entity.velocity.x -= entity.velocity.x * this.friction * dt;
+                        entity.velocity.z -= entity.velocity.z * this.friction * dt;
+
+                        if (intent.jump) { entity.velocity.y = this.jumpForce; state.isGrounded = false; }
+                    }
+                }
+            }
+        }
+
+        class PhysicsSystem {
+            constructor() { this.gravity = 30.0; }
+            update(dt, entities) {
+                for (const [id, entity] of entities) {
+                    const state = entity.components.PlayerState;
+                    if (!state) continue;
+
+                    if (!state.isGrounded) entity.velocity.y -= this.gravity * dt;
+                    entity.position.addScaledVector(entity.velocity, dt);
+
+                    if (entity.position.y <= 2.0) {
+                        entity.position.y = 2.0; entity.velocity.y = 0; state.isGrounded = true;
+                    }
+
+                    const horizSpeed = Math.sqrt(entity.velocity.x**2 + entity.velocity.z**2);
+                    if (!state.isGrounded) state.movementState = 'airborne';
+                    else if (horizSpeed > 5.0) state.movementState = 'running';
+                    else if (horizSpeed > 0.5) state.movementState = 'walking';
+                    else state.movementState = 'idle';
+                }
+            }
+        }
+
+        class WeaponSystem {
+            constructor(shootableMeshes, hitEventQueue) {
+                this.shootableMeshes = shootableMeshes; 
+                this.hitEvents = hitEventQueue;
+                this.raycaster = new THREE.Raycaster();
+            }
+            update(dt, entities) {
+                for (const [id, entity] of entities) {
+                    const weapon = entity.components.WeaponState;
+                    const intent = entity.components.InputIntent;
+                    const health = entity.components.HealthState;
+                    const state = entity.components.PlayerState;
+                    
+                    if ((health && !health.isAlive) || !weapon || !intent || !state) continue;
+                    
+                    weapon.timeSinceLastShot += dt;
+                    const cfg = weapon.config;
+
+                    if (weapon.timeSinceLastShot > cfg.recoilResetTime && weapon.shotsFired > 0) weapon.shotsFired = 0;
+                    if (weapon.shotsFired === 0 && weapon.currentRecoilPitch > 0) {
+                        const rec = Math.min(weapon.currentRecoilPitch, cfg.recoilRecoveryRate * dt);
+                        weapon.currentRecoilPitch -= rec; entity.rotation.pitch -= rec; 
+                    }
+
+                    if (GAME_STATE.phase !== 'ACTIVE') continue;
+
+                    if (intent.shoot && weapon.ammo > 0 && weapon.timeSinceLastShot >= cfg.fireRate) {
+                        weapon.timeSinceLastShot = 0; weapon.ammo--;
+                        
+                        if (entity.components.Tags?.has('LocalPlayer')) {
+                            document.getElementById('ammoDisplay').innerText = `${weapon.ammo}/${cfg.ammo}`;
+                        }
+
+                        let spread = cfg.baseSpread + cfg.spreadModifiers[state.movementState];
+                        if (intent.ads) spread *= cfg.adsSpreadMultiplier;
+
+                        const recoilIndex = Math.min(weapon.shotsFired, cfg.recoilPattern.length - 1);
+                        const recoil = cfg.recoilPattern[recoilIndex];
+                        weapon.shotsFired++;
+
+                        entity.rotation.pitch += recoil.p; entity.rotation.yaw += recoil.y;
+                        weapon.currentRecoilPitch += recoil.p;
+
+                        const euler = new THREE.Euler(entity.rotation.pitch, entity.rotation.yaw, 0, 'YXZ');
+                        const forward = new THREE.Vector3(0, 0, -1).applyEuler(euler);
+                        forward.x += (Math.random() - 0.5) * spread; forward.y += (Math.random() - 0.5) * spread; forward.normalize();
+
+                        this.raycaster.set(entity.position, forward);
+                        const intersects = this.raycaster.intersectObjects(this.shootableMeshes);
+
+                        if (intersects.length > 0) {
+                            const hitMesh = intersects[0].object;
+                            const victimId = hitMesh.userData.entityId; 
+                            if (victimId && victimId !== id) {
+                                this.hitEvents.push({ attackerId: id, victimId: victimId, damage: cfg.damage });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        class DamageSystem {
+            update(hitEvents, entities) {
+                while (hitEvents.length > 0) {
+                    const event = hitEvents.pop(); 
+                    const victim = entities.get(event.victimId);
+                    
+                    if (victim && victim.components.HealthState && victim.components.HealthState.isAlive) {
+                        victim.components.HealthState.current -= event.damage;
+                        if (victim.components.HealthState.current <= 0) {
+                            victim.components.HealthState.current = 0;
+                            victim.components.HealthState.isAlive = false;
+                            victim.components.Tags.list.add('Dead');
+                        } 
+                    }
+                }
+            }
+        }
+
+        // ==========================================
+        // 5. ECS-AWARE RENDER SYSTEM
+        // ==========================================
+        class RenderSystem {
+            constructor(scene, camera, shootableMeshesArray) {
+                this.scene = scene; this.camera = camera;
+                this.shootableMeshes = shootableMeshesArray; // Reference passed to WeaponSystem
+                this.meshMap = new Map(); // Track entityId -> Object3D
+                
+                // Gun setup
+                this.gunGroup = new THREE.Group();
+                const gunMesh = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.25, 1.0), new THREE.MeshLambertMaterial({ color: 0x444444 }));
+                const sight = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.05, 0.05), new THREE.MeshBasicMaterial({ color: 0xff0000 }));
+                sight.position.set(0, 0.15, -0.4);
+                this.gunGroup.add(gunMesh); this.gunGroup.add(sight);
+                this.camera.add(this.gunGroup);
+            }
+
+            update(dt, entities, localPlayerId) {
+                // 1. Sync / Spawn Meshes
+                for (const [id, entity] of entities) {
+                    let mesh = this.meshMap.get(id);
+
+                    if (!mesh) {
+                        // Create mesh based on tags
+                        if (entity.components.Tags?.has('Enemy')) {
+                            mesh = new THREE.Mesh(new THREE.BoxGeometry(2, 4, 2), new THREE.MeshLambertMaterial({ color: 0xff0000 }));
+                            mesh.userData.entityId = id;
+                            this.shootableMeshes.push(mesh); // Make it shootable
+                            this.scene.add(mesh);
+                            this.meshMap.set(id, mesh);
+                        } 
+                        else if (entity.components.Tags?.has('Smoke')) {
+                            mesh = new THREE.Mesh(new THREE.SphereGeometry(6, 16, 16), new THREE.MeshLambertMaterial({ color: 0x555555, transparent: true, opacity: 0.8 }));
+                            this.scene.add(mesh);
+                            this.meshMap.set(id, mesh);
+                        }
+                    }
+
+                    // Update existing mesh positions
+                    if (mesh) {
+                        mesh.position.copy(entity.position);
+                        // Visual death indicator (shrink or sink)
+                        if (entity.components.Tags?.has('Enemy')) {
+                            if (!entity.components.HealthState.isAlive) mesh.position.y = -5;
+                            else mesh.position.y = 2;
+                        }
+                    }
+                }
+
+                // 2. Cleanup Destroyed Entities
+                for (const [id, mesh] of this.meshMap.entries()) {
+                    if (!entities.has(id)) {
+                        this.scene.remove(mesh);
+                        // Remove from shootable array if it was there
+                        const idx = this.shootableMeshes.indexOf(mesh);
+                        if (idx > -1) this.shootableMeshes.splice(idx, 1);
+                        this.meshMap.delete(id);
+                    }
+                }
+
+                // 3. Local Player Camera & Gun Logic
+                const player = entities.get(localPlayerId);
+                if (player) {
+                    this.camera.position.copy(player.position);
+                    this.camera.rotation.set(player.rotation.pitch, player.rotation.yaw, 0, 'YXZ');
+
+                    const intent = player.components.InputIntent;
+                    if (intent) {
+                        const targetPos = intent.ads ? new THREE.Vector3(0, -0.15, -0.4) : new THREE.Vector3(0.4, -0.3, -0.6);
+                        this.gunGroup.position.lerp(targetPos, dt * 12);
+                        if (intent.shoot && GAME_STATE.phase === 'ACTIVE') this.gunGroup.position.z += 0.1;
+
+                        const targetFov = intent.ads ? 65 : 90;
+                        this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, targetFov, dt * 12);
+                        this.camera.updateProjectionMatrix();
+                    }
+                }
+            }
+        }
+
+        // ==========================================
+        // 6. INPUT MANAGER
+        // ==========================================
+        class InputManager {
+            constructor() {
+                this.binds = { forward: 'w', backward: 's', left: 'a', right: 'd', jump: ' ', ability1: 'q', ability2: 'e' };
+                this.keys = {}; this.mouse = { movementX: 0, movementY: 0, leftClick: false, rightClick: false };
+                this.isPaused = true;
+                
+                document.addEventListener('keydown', (e) => this.keys[e.key.toLowerCase()] = true);
+                document.addEventListener('keyup', (e) => this.keys[e.key.toLowerCase()] = false);
+                document.addEventListener('mousedown', (e) => {
+                    if (this.isPaused) return;
+                    if (e.button === 0) this.mouse.leftClick = true; if (e.button === 2) this.mouse.rightClick = true;
+                });
+                document.addEventListener('mouseup', (e) => {
+                    if (e.button === 0) this.mouse.leftClick = false; if (e.button === 2) this.mouse.rightClick = false;
+                });
+                document.addEventListener('contextmenu', e => e.preventDefault());
+                document.addEventListener('mousemove', (e) => {
+                    if (document.pointerLockElement) { this.mouse.movementX += e.movementX; this.mouse.movementY += e.movementY; }
+                });
+                document.addEventListener('pointerlockchange', () => {
+                    if (document.pointerLockElement === document.body) { this.isPaused = false; document.getElementById('menu').style.display = 'none'; } 
+                    else { this.isPaused = true; document.getElementById('menu').style.display = 'flex'; this.keys = {}; this.mouse.leftClick = false; this.mouse.rightClick = false; }
+                });
+            }
+            isAction(action) { return this.keys[this.binds[action]]; }
+            consumeMouseDelta() { const delta = { x: this.mouse.movementX, y: this.mouse.movementY }; this.mouse.movementX = 0; this.mouse.movementY = 0; return delta; }
+        }
+
+        // ==========================================
+        // 7. ORCHESTRATOR & ENGINE LOOP
+        // ==========================================
+        class GameEngine {
+            constructor(scene, camera) {
+                this.entityManager = new EntityManager();
+                this.inputManager = new InputManager();
+                
+                this.hitEventQueue = [];
+                this.abilityEventQueue = [];
+                this.shootableMeshes = []; // RenderSystem populates this, WeaponSystem reads it
+
+                // Core Systems
+                this.roundSystem = new RoundSystem();
+                this.abilitySystem = new AbilitySystem(this.abilityEventQueue);
+                this.abilityActionSystem = new AbilityActionSystem(this.entityManager);
+                this.movementSystem = new MovementSystem();
+                this.physicsSystem = new PhysicsSystem();
+                this.weaponSystem = new WeaponSystem(this.shootableMeshes, this.hitEventQueue);
+                this.damageSystem = new DamageSystem();
+                this.lifetimeSystem = new LifetimeSystem(this.entityManager);
+                this.renderSystem = new RenderSystem(scene, camera, this.shootableMeshes);
+
+                this.localPlayerId = this.setupPlayer();
+                this.setupBot();
+                this.setupUIBindings();
+            }
+
+            setupPlayer() {
+                const id = this.entityManager.createEntity().id;
+                this.entityManager.addComponent(id, 'Tags', new Tags(['LocalPlayer', 'Player']));
+                this.entityManager.addComponent(id, 'HealthState', new HealthState(100));
+                this.entityManager.addComponent(id, 'InputIntent', new InputIntent());
+                this.entityManager.addComponent(id, 'PlayerState', new PlayerState());
+                this.entityManager.addComponent(id, 'WeaponState', new WeaponState('VANDAL'));
+                this.entityManager.addComponent(id, 'AbilityState', new AbilityState());
+                this.entityManager.addComponent(id, 'SpawnPoint', new SpawnPoint(0, 2, 0));
+                return id;
+            }
+
+            setupBot() {
+                const id = this.entityManager.createEntity().id;
+                this.entityManager.addComponent(id, 'Tags', new Tags(['Enemy']));
+                this.entityManager.addComponent(id, 'HealthState', new HealthState(100));
+                this.entityManager.addComponent(id, 'SpawnPoint', new SpawnPoint(0, 2, -15));
+                const bot = this.entityManager.entities.get(id);
+                bot.position.copy(bot.components.SpawnPoint.position);
+            }
+
+            pollInput() {
+                const player = this.entityManager.entities.get(this.localPlayerId);
+                if (!player || this.inputManager.isPaused) return;
+
+                const intent = player.components.InputIntent;
+                intent.mouseDelta = this.inputManager.consumeMouseDelta();
+                
+                intent.moveDir.set(0, 0, 0);
+                if (this.inputManager.isAction('forward')) intent.moveDir.z -= 1;
+                if (this.inputManager.isAction('backward')) intent.moveDir.z += 1;
+                if (this.inputManager.isAction('left')) intent.moveDir.x -= 1;
+                if (this.inputManager.isAction('right')) intent.moveDir.x += 1;
+
+                intent.jump = this.inputManager.isAction('jump');
+                intent.shoot = this.inputManager.mouse.leftClick;
+                intent.ads = this.inputManager.mouse.rightClick;
+                intent.ability1 = this.inputManager.isAction('ability1');
+                intent.ability2 = this.inputManager.isAction('ability2');
+            }
+
+            update(dt) {
+                this.pollInput();
+                const entities = this.entityManager.entities;
+                
+                this.roundSystem.update(dt, entities, GAME_STATE);
+                this.abilitySystem.update(dt, entities);
+                this.abilityActionSystem.update(this.abilityEventQueue, entities);
+                this.movementSystem.update(dt, entities);
+                this.physicsSystem.update(dt, entities);
+                this.weaponSystem.update(dt, entities);
+                this.damageSystem.update(this.hitEventQueue, entities);
+                this.lifetimeSystem.update(dt, entities);
+                
+                this.entityManager.cleanup();
+            }
+
+            render(dt) { this.renderSystem.update(dt, this.entityManager.entities, this.localPlayerId); }
+
+            setupUIBindings() {
+                const container = document.getElementById('bindsContainer');
+                for (const [action, key] of Object.entries(this.inputManager.binds)) {
+                    const row = document.createElement('div'); row.className = 'bind-row';
+                    const label = document.createElement('span'); label.innerText = action.toUpperCase();
+                    const btn = document.createElement('button'); btn.className = 'bind-btn'; btn.innerText = key === ' ' ? 'SPACE' : key.toUpperCase();
+                    btn.onclick = () => {
+                        btn.innerText = "Press any key...";
+                        const onKey = (e) => { e.preventDefault(); this.inputManager.binds[action] = e.key.toLowerCase(); btn.innerText = e.key.toUpperCase(); document.removeEventListener('keydown', onKey); };
+                        document.addEventListener('keydown', onKey);
+                    };
+                    row.appendChild(label); row.appendChild(btn); container.appendChild(row);
+                }
+                document.getElementById('resumeBtn').addEventListener('click', () => document.body.requestPointerLock());
+            }
+        }
+
+        // ==========================================
+        // 8. SCENE INITIALIZATION & LOOP
+        // ==========================================
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(90, window.innerWidth / window.innerHeight, 0.1, 1000);
+        scene.add(camera); 
+
+        const renderer = new THREE.WebGLRenderer({ antialias: false });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setClearColor(0x87CEEB);
+        document.body.appendChild(renderer.domElement);
+
+        scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(10, 20, 10); scene.add(dirLight);
+
+        const floor = new THREE.Mesh(new THREE.PlaneGeometry(100, 100), new THREE.MeshLambertMaterial({ color: 0x555555, wireframe: true }));
+        floor.rotation.x = -Math.PI / 2; scene.add(floor);
+
+        const engine = new GameEngine(scene, camera);
+
+        let lastTime = performance.now();
+        const fixedDelta = 1 / 60;
+        let accumulator = 0;
+
+        function loop() {
+            requestAnimationFrame(loop);
+            const now = performance.now();
+            accumulator += (now - lastTime) / 1000;
+            lastTime = now;
+
+            while (accumulator >= fixedDelta) {
+                engine.update(fixedDelta);
+                
+                // Clear transient inputs
+                const player = engine.entityManager.entities.get(engine.localPlayerId);
+                if (player) {
+                    player.components.InputIntent.shoot = false;
+                    player.components.InputIntent.ability1 = false;
+                    player.components.InputIntent.ability2 = false;
+                }
+                
+                accumulator -= fixedDelta;
+            }
+            engine.render(accumulator);
+            renderer.render(scene, camera);
+        }
+        loop();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Tactical Web FPS</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #87CEEB; }
+        canvas { display: block; }
+        /* CSS Crosshair for zero-latency feedback */
+        #crosshair {
+            position: absolute; top: 50%; left: 50%;
+            width: 4px; height: 4px; background: cyan;
+            transform: translate(-50%, -50%); border-radius: 50%;
+            box-shadow: 0 0 2px black; pointer-events: none;
+        }
+        #ui { position: absolute; bottom: 20px; right: 20px; color: white; font-family: monospace; font-size: 24px; text-shadow: 1px 1px black; }
+    </style>
+</head>
+<body>
+    <div id="crosshair"></div>
+    <div id="ui">Ammo: <span id="ammoDisplay">25/25</span></div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="game.js"></script>
+</body>
+</html>
