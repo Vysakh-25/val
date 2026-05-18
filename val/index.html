@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tactical FPS v4 - Production Split Build</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <div id="start-screen" class="overlay-screen" style="display: flex;">
+    <h1>TACTICAL v4</h1>
+    <div class="subtitle">SPIKE PROTOCOL MVP</div>
+    <div class="controls-grid" id="start-controls-grid"></div>
+    <button class="start-btn" id="start-btn">▶ PLAY AS ATTACKER</button>
+    <button class="start-btn" id="start-btn-def" style="background:#1155aa;margin-top:6px">▶ PLAY AS DEFENDER</button>
+    <button class="settings-btn" id="open-kb-btn">⚙ KEYBIND SETTINGS</button>
+  </div>
+
+  <div id="pause-menu" style="display: none;">
+    <h1>PAUSED</h1>
+    <button class="pause-btn" id="btn-resume">RESUME</button>
+    <button class="pause-btn" id="btn-settings">SETTINGS (KEYBINDS)</button>
+    <button class="pause-btn highlight" id="btn-practice">RESTART (PRACTICE MODE)</button>
+    <button class="pause-btn" id="btn-leave">LEAVE MATCH</button>
+  </div>
+
+  <div id="round-result" class="overlay-screen">
+    <h1 id="result-title">VICTORY</h1>
+    <p id="result-sub">Spike detonated</p>
+    <button class="start-btn" id="result-restart">PLAY AGAIN</button>
+  </div>
+
+  <div id="keybind-menu">
+    <h2>KEYBINDS</h2>
+    <div class="kb-subtitle">CLICK A BINDING THEN PRESS ANY KEY</div>
+    <table class="kb-table"><tbody id="kb-tbody"></tbody></table>
+    <div id="kb-conflict-msg"></div>
+    <div class="kb-footer">
+      <button class="kb-save-btn" id="kb-save">SAVE &amp; CLOSE</button>
+      <button class="kb-reset-btn" id="kb-reset">RESET DEFAULTS</button>
+      <button class="kb-cancel-btn" id="kb-cancel">CANCEL</button>
+    </div>
+  </div>
+
+  <div id="ui-layer">
+    <button id="ai-debug-btn">AI DEBUG: OFF</button>
+    <div id="direction-indicators">
+      <div id="dmg-top" class="dmg-indicator"></div>
+      <div id="dmg-bottom" class="dmg-indicator"></div>
+      <div id="dmg-left" class="dmg-indicator"></div>
+      <div id="dmg-right" class="dmg-indicator"></div>
+    </div>
+    <div id="suppression-overlay"></div>
+
+    <div id="crosshair-container">
+      <div id="ch-top" class="crosshair-line"></div><div id="ch-bot" class="crosshair-line"></div>
+      <div id="ch-left" class="crosshair-line"></div><div id="ch-right" class="crosshair-line"></div>
+    </div>
+    <div id="hitmarker">
+      <div class="hm-line hm-tl"></div><div class="hm-line hm-tr"></div>
+      <div class="hm-line hm-bl"></div><div class="hm-line hm-br"></div>
+    </div>
+
+    <div id="scope-overlay">
+      <canvas id="scope-canvas" width="520" height="520"></canvas>
+      <svg id="scope-reticle" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+        <rect x="0"  y="0"  width="35" height="100" fill="black"/>
+        <rect x="65" y="0"  width="35" height="100" fill="black"/>
+        <rect x="35" y="0"  width="30" height="35"  fill="black"/>
+        <rect x="35" y="65" width="30" height="35"  fill="black"/>
+        <circle cx="50" cy="50" r="14.7" fill="none" stroke="#1a1a1a" stroke-width="0.5"/>
+        <line x1="35" y1="50" x2="47.5" y2="50" stroke="#0f0" stroke-width="0.4"/>
+        <line x1="52.5" y1="50" x2="65" y2="50" stroke="#0f0" stroke-width="0.4"/>
+        <line x1="50" y1="35" x2="50" y2="47.5" stroke="#0f0" stroke-width="0.4"/>
+        <line x1="50" y1="52.5" x2="50" y2="65" stroke="#0f0" stroke-width="0.4"/>
+      </svg>
+    </div>
+
+    <div id="reload-bar-wrap"><div id="reload-label">RELOADING</div><div id="reload-bar-bg"><div id="reload-bar-fill"></div></div></div>
+    <div id="spike-bar-wrap"><div id="spike-bar-label">PLANTING</div><div id="spike-bar-bg"><div id="spike-bar-fill" style="background:#ffdd00"></div></div></div>
+    <div id="spike-timer"><div id="spike-timer-label">SPIKE</div><div id="spike-timer-val">45</div></div>
+    <div id="interact-prompt"></div>
+    <div id="spike-carry">◈ SPIKE EQUIPPED — F to plant on site</div>
+    <div id="role-badge" class="attacker">ATTACKER</div>
+    <div id="killfeed"></div>
+    <div id="abilities">
+      <div id="ab-smoke" class="ability-icon">?<span class="ab-name">SMOKE</span></div>
+      <div id="ab-dash"  class="ability-icon">?<span class="ab-name">DASH</span></div>
+    </div>
+    <div id="hud-bottom">
+      <div class="hud-panel">HP: <span id="hp-display">100</span></div>
+      <div class="hud-panel"><span id="ammo-display">25</span> / <span id="reserve-display">75</span></div>
+    </div>
+    <div id="weapon-slots">
+      <div class="weapon-slot" id="slot-4"><span class="slot-key" id="slotkey-4">4</span>KNIFE</div>
+      <div class="weapon-slot" id="slot-3"><span class="slot-key" id="slotkey-3">3</span>OPERATOR</div>
+      <div class="weapon-slot" id="slot-2"><span class="slot-key" id="slotkey-2">2</span>SHORTY</div>
+      <div class="weapon-slot active" id="slot-1"><span class="slot-key" id="slotkey-1">1</span>VANDAL</div>
+    </div>
+    <div id="esc-hint">ESC — SETTINGS</div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  
+  <script src="js/weapons.js"></script>
+  <script src="js/input.js"></script>
+  <script src="js/game-engine.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
