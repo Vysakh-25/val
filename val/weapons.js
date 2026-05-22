@@ -1,4 +1,3 @@
-// WEAPON CONFIGURATION DATA PROFILE MATRIX
 const WEAPONS = {
   vandal: {
     name: 'Vandal', slot: 1, ammo: 25, reserve: 75, reloadTime: 2500,
@@ -18,6 +17,8 @@ const WEAPONS = {
   knife: {
     name: 'Knife', slot: 4, ammo: 0, reserve: 0, reloadTime: 0,
     damageHead: 75, damageBody: 50, damageLeg: 50, fireRate: 1.5,
-    isAutomatic: false, sprayControl: 0, zoomFov: 75, isKnife: true, type: 'knife'
+    isAutomatic: false, sprayControl: 0.0, zoomFov: 75, type: 'knife'
   }
 };
+
+window.WEAPONS = WEAPONS;
